@@ -28,7 +28,9 @@ module  pll_0002(
 
     // PLL: 50 MHz in, VCO = 768.0000 MHz (M=15 + 0.36, N=1)
     // outclk_0 = VCO/8  = 96.0000 MHz  (clk_sys for clock_div)
-    // outclk_1 = VCO/32 = 24.0000 MHz  (spare)
+    // DIAG-REVERT-2026-10-13: original below — outclk_1 is now the phase-steppable SDRAM clock
+    // // outclk_1 = VCO/32 = 24.0000 MHz  (spare)
+    // outclk_1 = VCO/8  = 96.0000 MHz  (SDRAM_CLK; DPS steps it, 64 steps per period)
     // outclk_2 = VCO/64 = 12.0000 MHz  (spare)
 
     altera_pll #(
@@ -41,7 +43,9 @@ module  pll_0002(
         .output_clock_frequency0("96.000000 MHz"),
         .phase_shift0("0 ps"),
         .duty_cycle0(50),
-        .output_clock_frequency1("24.000000 MHz"),
+        // DIAG-REVERT-2026-10-13: original below
+        // .output_clock_frequency1("24.000000 MHz"),
+        .output_clock_frequency1("96.000000 MHz"),
         .phase_shift1("0 ps"),
         .duty_cycle1(50),
         .output_clock_frequency2("12.000000 MHz"),
@@ -109,8 +113,11 @@ module  pll_0002(
         .c_cnt_in_src0("ph_mux_clk"),
         .c_cnt_bypass_en0("false"),
         .c_cnt_odd_div_duty_en0("false"),
-        .c_cnt_hi_div1(16),
-        .c_cnt_lo_div1(16),
+        // DIAG-REVERT-2026-10-13: original below (C1 = copy of C0)
+        // .c_cnt_hi_div1(16),
+        // .c_cnt_lo_div1(16),
+        .c_cnt_hi_div1(4),
+        .c_cnt_lo_div1(4),
         .c_cnt_prst1(1),
         .c_cnt_ph_mux_prst1(0),
         .c_cnt_in_src1("ph_mux_clk"),

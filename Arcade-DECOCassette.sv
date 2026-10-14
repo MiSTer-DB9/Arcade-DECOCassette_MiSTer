@@ -71,6 +71,8 @@ localparam CONF_STR = {
 	"P2O[26],Dim video after 10s,On,Off;",
 	"-;",
 	"O[29:27],Fast Load,Off,2x,4x,8x,16x;",
+	// DIAG-REVERT-2026-10-13: SDRAM clock phase option added
+	"O[21:18],SDRAM Clk Phase,Auto,0.0ns,0.7ns,1.3ns,2.0ns,2.6ns,3.3ns,3.9ns,4.6ns,5.2ns,5.9ns,6.5ns,7.2ns,7.8ns,8.5ns,9.1ns;",
 	"-;",
 	"DIP;",
 	"-;",
@@ -92,13 +94,69 @@ localparam CONF_STR = {
 wire clk_sys;
 wire pll_locked;
 
+// DIAG-REVERT-2026-10-13: original PLL instance commented out below
+// pll pll
+// (
+//     .refclk   (CLK_50M),
+//     .rst      (1'b0),
+//     .outclk_0 (clk_sys),
+//     .locked   (pll_locked)
+// );
+wire        CLK_SDRAM;          // 96 MHz, same as clk_sys at phase position 0
+wire [63:0] reconfig_to_pll, reconfig_from_pll;
+
 pll pll
 (
     .refclk   (CLK_50M),
     .rst      (1'b0),
     .outclk_0 (clk_sys),
-    .locked   (pll_locked)
+    .outclk_1 (CLK_SDRAM),
+    .locked   (pll_locked),
+    .reconfig_to_pll   (reconfig_to_pll),
+    .reconfig_from_pll (reconfig_from_pll)
 );
+
+// DIAG-REVERT-2026-10-13: SDRAM clock phase block added. One DPS step = VCO/8 = 163 ps
+// (768 MHz VCO), 64 per 96 MHz period; manual OSD entries are 4 steps. Auto: the dongle
+// SDRAM path below sweeps all 64 after a dongle load and parks mid-window.
+wire        cfg_waitrequest, cfg_write;
+wire  [5:0] cfg_address;
+wire [31:0] cfg_data;
+
+pll_cfg pll_cfg
+(
+    .mgmt_clk(CLK_50M),
+    .mgmt_reset(1'b0),
+    .mgmt_waitrequest(cfg_waitrequest),
+    .mgmt_read(1'b0),
+    .mgmt_readdata(),
+    .mgmt_write(cfg_write),
+    .mgmt_address(cfg_address),
+    .mgmt_writedata(cfg_data),
+    .reconfig_to_pll(reconfig_to_pll),
+    .reconfig_from_pll(reconfig_from_pll)
+);
+
+wire  [6:0] cal_ph;
+wire        cal_tgl, cal_hold, ph_ack_tgl;
+
+sdram_phase_ctl #(.CNT_SEL(5'd1), .MAN_STEP(7'd4)) phase_ctl
+(
+    .clk(CLK_50M),
+    .sel(status[21:18]),
+    .cal_val(cal_ph),
+    .cal_tgl(cal_tgl),
+    .ack_tgl(ph_ack_tgl),
+    .cfg_waitrequest(cfg_waitrequest),
+    .cfg_write(cfg_write),
+    .cfg_address(cfg_address),
+    .cfg_data(cfg_data)
+);
+
+// Phase moved: ack the calibrator and drop the prefetched byte.
+reg  [2:0] ph_ack_s = 3'd0;
+always @(posedge clk_sys) ph_ack_s <= {ph_ack_s[1:0], ph_ack_tgl};
+wire       sd_recal = ph_ack_s[2] ^ ph_ack_s[1];
 
 // MCU-CLK-REALCLK-2026-06-04: dedicated REAL 8 MHz clock for the 8041 MCU, copied from
 // Arcade-JunoFirst's sound PLL (pll_sound: CLK_50M -> 8.000 MHz). The T48 core requires clk_i
@@ -268,7 +326,9 @@ assign ioctl_din        = 8'd0;
 // between the CPU coming out of reset and the SDRAM read-prefetch servicing dongle address 0. HW: still
 // requires a soft reset/reload — a few extra clk_sys cycles of reset extension made no difference.
 // Reverted to the original purely-combinational form.
-wire reset = (RESET | status[0] | buttons[1] | ioctl_download);
+// DIAG-REVERT-2026-10-13: original below — cal_hold keeps the game in reset through the phase sweep
+// wire reset = (RESET | status[0] | buttons[1] | ioctl_download);
+wire reset = (RESET | status[0] | buttons[1] | ioctl_download | cal_hold);
 // PAUSE-LOAD-2026-06-28: pause uses a reset WITHOUT ioctl_download so it can engage DURING the cassette load too
 // (user wants the loader pausable — pause works post-load but the `| ioctl_download` above killed it during the load).
 // Safe: the SD->SDRAM write path is NOT gated by pause_cpu, so the transfer still finishes; only the CPUs/8041/
@@ -1024,8 +1084,39 @@ reg         wr_req_pend;
 reg  [20:0] wr_req_addr;
 reg  [7:0]  wr_req_data;
 
+// ---- SDRAM clock phase calibration (DIAG-REVERT-2026-10-13: block added) ----
+// Reference = the dongle region (index 1, SDRAM word 0 up), checksummed as it downloads.
+// This path always reads at completion (Normal), so only Normal may win the sweep.
+wire        cal_busy, cal_rd_go;
+wire [14:0] cal_rd_word;
+reg         sd_cal = 1'b0;
+reg   [7:0] dl_prev = 8'd0;
+reg  [15:0] sd_dout_d1;
+always @(posedge clk_sys) sd_dout_d1 <= sd_dout;
+always @(posedge clk_sys) if (ioctl_wr && dongle_ld) dl_prev <= ioctl_dout;
+// Refresh fires only on the idle all-ones count: keep the bus free for its last 32 cycles.
+wire        cal_take = !sd_busy && !wr_req_pend && cal_rd_go && (sd_refresh_cnt[9:5] != 5'h1F);
+wire        cal_cpl  = sd_busy && sd_ready && !sd_rd && !sd_wr && sd_was_rd && sd_cal;
+
+sdram_phase_cal #(.POS(7'd64), .LATCH_MASK(4'b0010), .QUIET_BITS(22)) phase_cal
+(
+    .clk(clk_sys), .por_reset(sdram_ld_reset),
+    .ref_clr(ioctl_wr && dongle_ld && (ioctl_addr == 25'd0)),
+    .ref_wd(ioctl_wr && dongle_ld && ioctl_addr[0]),
+    .ref_w({ioctl_dout, dl_prev}),
+    .ph_auto(status[21:18] == 4'd0), .ld_busy(ioctl_download | status[0]), .dl_active(ioctl_download),
+    .blocked(1'b0),
+    .ph_req_val(cal_ph), .ph_req_tgl(cal_tgl), .ph_ack(sd_recal),
+    .rd_go(cal_rd_go), .rd_word(cal_rd_word), .rd_take(cal_take), .rd_cpl(cal_cpl),
+    .sd_dout(sd_dout), .sd_dout_d1(sd_dout_d1),
+    .busy(cal_busy), .hold(cal_hold)
+);
+
+
 // Throttle the HPS while a dongle write is requested/in-flight (combinational so it lands in time).
-assign ioctl_wait = sd_busy || (ioctl_wr && dongle_ld);
+// DIAG-REVERT-2026-10-13: original below — cal_busy holds the HPS while an aborted sweep restores the phase
+// assign ioctl_wait = sd_busy || (ioctl_wr && dongle_ld);
+assign ioctl_wait = sd_busy || (ioctl_wr && dongle_ld) || cal_busy;
 
 // SDRAM-HS-FIX-2026-06-10: proper ready-EDGE handshake — mirrors NeoGeo sdram_mux.sv, which drives this
 // byte-identical Sorgelig controller. The OLD `else if (sd_ready)` sampled the controller's IDLE ready=1 the
@@ -1038,6 +1129,7 @@ always @(posedge clk_sys) begin
 		sd_rd <= 0; sd_wr <= 0; sd_refresh <= 0; sd_busy <= 0; sd_was_rd <= 0;
 		sd_last_addr <= 20'hFFFFF; sd_refresh_cnt <= 0; sd_old_ready <= 1'b1;
 		wr_req_pend <= 1'b0;
+		sd_cal <= 1'b0;   // DIAG-REVERT-2026-10-13: added
 	end else begin
 		sd_refresh_cnt <= sd_refresh_cnt + 1'b1;
 		sd_old_ready   <= sd_ready;
@@ -1061,7 +1153,10 @@ always @(posedge clk_sys) begin
 		if (sd_busy) begin
 			// rd/wr COMPLETE = ready back HIGH with the strobe already cleared (it fell, then rose).
 			if (sd_ready && !sd_rd && !sd_wr) begin
-				if (sd_was_rd) dprom_q_ddr <= sd_last_addr[0] ? sd_dout[15:8] : sd_dout[7:0];
+				// DIAG-REVERT-2026-10-13: original below — a calibration read must not land in dprom_q_ddr
+				// if (sd_was_rd) dprom_q_ddr <= sd_last_addr[0] ? sd_dout[15:8] : sd_dout[7:0];
+				if (sd_was_rd && !sd_cal) dprom_q_ddr <= sd_last_addr[0] ? sd_dout[15:8] : sd_dout[7:0];
+				sd_cal <= 1'b0;
 				sd_busy <= 0;
 			end
 		end else begin
@@ -1072,14 +1167,22 @@ always @(posedge clk_sys) begin
 				sd_wr       <= 1; sd_busy <= 1; sd_was_rd <= 0;
 				wr_req_pend <= 1'b0;
 				sd_last_addr <= 20'hFFFFF;                         // write invalidates the read cache -> re-fetch after load
-			end else if (!ioctl_download && dprom_addr[19:0] != sd_last_addr) begin   // READ: prefetch
+			// DIAG-REVERT-2026-10-13: original below
+			// end else if (!ioctl_download && dprom_addr[19:0] != sd_last_addr) begin   // READ: prefetch
+			end else if (!ioctl_download && !cal_busy && dprom_addr[19:0] != sd_last_addr) begin   // READ: prefetch
 				sd_last_addr <= dprom_addr[19:0];
 				sd_addr  <= {7'd0, dprom_addr[19:1]};
 				sd_rd    <= 1; sd_busy <= 1; sd_was_rd <= 1;
 			end else if (&sd_refresh_cnt) begin                    // periodic AUTO_REFRESH: one-edge toggle
 				sd_refresh <= ~sd_refresh;
+			// DIAG-REVERT-2026-10-13: calibration read issue added
+			end else if (cal_take) begin
+				sd_addr <= {11'd0, cal_rd_word};
+				sd_rd   <= 1; sd_busy <= 1; sd_was_rd <= 1; sd_cal <= 1;
 			end
 		end
+		// DIAG-REVERT-2026-10-13: a phase move invalidates the prefetched byte
+		if (sd_recal) sd_last_addr <= 20'hFFFFF;
 	end
 end
 
@@ -1088,11 +1191,39 @@ sdram sdram_dongle (
 	.clk        (clk_sys),
 	.SDRAM_DQ   (SDRAM_DQ),   .SDRAM_A    (SDRAM_A),    .SDRAM_DQML (SDRAM_DQML), .SDRAM_DQMH (SDRAM_DQMH),
 	.SDRAM_BA   (SDRAM_BA),   .SDRAM_nCS  (SDRAM_nCS),  .SDRAM_nWE  (SDRAM_nWE),  .SDRAM_nRAS (SDRAM_nRAS),
-	.SDRAM_nCAS (SDRAM_nCAS), .SDRAM_CKE  (SDRAM_CKE),  .SDRAM_CLK  (SDRAM_CLK),  .SDRAM_EN   (1'b1),
+	// DIAG-REVERT-2026-10-13: original below — SDRAM_CLK now comes from CLK_SDRAM
+	// .SDRAM_nCAS (SDRAM_nCAS), .SDRAM_CKE  (SDRAM_CKE),  .SDRAM_CLK  (SDRAM_CLK),  .SDRAM_EN   (1'b1),
+	.SDRAM_nCAS (SDRAM_nCAS), .SDRAM_CKE  (SDRAM_CKE),  .SDRAM_CLK  (),  .SDRAM_EN   (1'b1),
 	.sel        (1'b1),
 	.addr       (sd_addr),    .dout (sd_dout), .din (sd_din),
 	.wr         (sd_wr),      .bs   (sd_bs),   .rd  (sd_rd),  .ready (sd_ready), .refresh (sd_refresh),
 	.cpsel (1'b0), .cpaddr (26'd0), .cpdin (16'd0), .cprd (), .cpreq (1'b0), .cpbusy ()
+);
+
+// DIAG-REVERT-2026-10-13: SDRAM_CLK driver added. Same inverted DDR output as sdram.sv's, on CLK_SDRAM.
+altddio_out
+#(
+	.extend_oe_disable("OFF"),
+	.intended_device_family("Cyclone V"),
+	.invert_output("OFF"),
+	.lpm_hint("UNUSED"),
+	.lpm_type("altddio_out"),
+	.oe_reg("UNREGISTERED"),
+	.power_up_high("OFF"),
+	.width(1)
+)
+sdramclk_ddr
+(
+	.datain_h(1'b0),
+	.datain_l(1'b1),
+	.outclock(CLK_SDRAM),
+	.dataout(SDRAM_CLK),
+	.aclr(1'b0),
+	.aset(1'b0),
+	.oe(1'b1),
+	.outclocken(1'b1),
+	.sclr(1'b0),
+	.sset(1'b0)
 );
 
 // =========================================================================
