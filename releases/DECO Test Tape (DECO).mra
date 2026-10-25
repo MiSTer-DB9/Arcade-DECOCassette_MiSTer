@@ -6,7 +6,7 @@
   Metadata $02E00 = 01 00 00  (dongle_type=0x01, game_id=0x00 = DECO release #0)
 -->
 <misterromdescription>
-    <name>Test Tape</name>
+    <name>DECO Test Tape</name>
     <setname>ctsttape</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

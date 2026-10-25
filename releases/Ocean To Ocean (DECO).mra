@@ -6,7 +6,7 @@
   Metadata $02E00 = 01 0A 00  (dongle_type=0x01, game_id=0x0A = DECO release #10)
 -->
 <misterromdescription>
-    <name>Ocean to Ocean (US)</name>
+    <name>Ocean To Ocean</name>
     <setname>cocean6b</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

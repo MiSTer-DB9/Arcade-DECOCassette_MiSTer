@@ -278,20 +278,31 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 );
 
 // Keyboard coin/start (MAME defaults): 1 = 1P Start, 2 = 2P Start, 5 = Coin 1, 6 = Coin 2.
-reg kb_start1 = 0, kb_start2 = 0, kb_coin1 = 0, kb_coin2 = 0;
-reg kb_old_toggle = 0;
-always @(posedge clk_sys) begin
-	kb_old_toggle <= ps2_key[10];
-	if (kb_old_toggle != ps2_key[10] && !ps2_key[8]) begin
-		case (ps2_key[7:0])
-			8'h16: kb_start1 <= ps2_key[9];
-			8'h1E: kb_start2 <= ps2_key[9];
-			8'h2E: kb_coin1  <= ps2_key[9];
-			8'h36: kb_coin2  <= ps2_key[9];
-			default: ;
-		endcase
-	end
-end
+// CTL-2026-10-25: original keyboard block, replaced by ctl_keyboard below
+// reg kb_start1 = 0, kb_start2 = 0, kb_coin1 = 0, kb_coin2 = 0;
+// reg kb_old_toggle = 0;
+// always @(posedge clk_sys) begin
+// 	kb_old_toggle <= ps2_key[10];
+// 	if (kb_old_toggle != ps2_key[10] && !ps2_key[8]) begin
+// 		case (ps2_key[7:0])
+// 			8'h16: kb_start1 <= ps2_key[9];
+// 			8'h1E: kb_start2 <= ps2_key[9];
+// 			8'h2E: kb_coin1  <= ps2_key[9];
+// 			8'h36: kb_coin2  <= ps2_key[9];
+// 			default: ;
+// 		endcase
+// 	end
+// end
+// CTL-2026-10-25: keyboard -> controllers.sv ctl_keyboard. STD_EXT 1 = these keys need the non-extended code, exactly the
+// old `!ps2_key[8]` gate. kb[6] 1, kb[7] 2, kb[8] 5, kb[9] 6. No toggle keys, so pause changes nothing.
+wire [12:0] kb;
+/* verilator lint_off PINCONNECTEMPTY */
+ctl_keyboard #(.STD_EXT(1)) keyboard(.clk(clk_sys), .ps2_key(ps2_key), .pause(pause_cpu), .kb(kb), .kbx());
+/* verilator lint_on PINCONNECTEMPTY */
+wire kb_start1 = kb[6];
+wire kb_start2 = kb[7];
+wire kb_coin1  = kb[8];
+wire kb_coin2  = kb[9];
 
 assign ioctl_upload_req = 1'b0;
 assign ioctl_din        = 8'd0;
@@ -1229,10 +1240,18 @@ wire [7:0] in0, in1, in2;
 // Pre-swap: assign in0 = {2'b00, joystick_0[5:0]};  /  assign in1 = {2'b00, joystick_1[5:0]};
 // The Tower (release 8) has twin 4-way sticks: IN bits[3:0] = right stick R/L/U/D, bits[7:4] = left stick R/L/U/D.
 wire ctower_mode = (dongle_type == 4'd1) && (game_id == 8'd8);
-wire signed [7:0] rx0 = joystick_r_analog_0[7:0], ry0 = joystick_r_analog_0[15:8];
-wire signed [7:0] rx1 = joystick_r_analog_1[7:0], ry1 = joystick_r_analog_1[15:8];
-wire [3:0] rstick0 = {ry0 > 8'sd48, ry0 < -8'sd48, rx0 < -8'sd48, rx0 > 8'sd48};  // {D,U,L,R}
-wire [3:0] rstick1 = {ry1 > 8'sd48, ry1 < -8'sd48, rx1 < -8'sd48, rx1 > 8'sd48};
+// CTL-2026-10-25: original right-stick decodes, replaced by ctl_stick_dirs below
+// wire signed [7:0] rx0 = joystick_r_analog_0[7:0], ry0 = joystick_r_analog_0[15:8];
+// wire signed [7:0] rx1 = joystick_r_analog_1[7:0], ry1 = joystick_r_analog_1[15:8];
+// wire [3:0] rstick0 = {ry0 > 8'sd48, ry0 < -8'sd48, rx0 < -8'sd48, rx0 > 8'sd48};  // {D,U,L,R}
+// wire [3:0] rstick1 = {ry1 > 8'sd48, ry1 < -8'sd48, rx1 < -8'sd48, rx1 > 8'sd48};
+// CTL-2026-10-25: right-stick decodes -> controllers.sv ctl_stick_dirs (each axis past +/-48, the same signed compares);
+// ctl_stick_dirs gives {U, D, L, R}, re-ordered to the old {D, U, L, R}.
+wire [3:0] rsd0, rsd1;
+ctl_stick_dirs #(.MODE(0), .THRESH(7'd48)) rstick_p1(.stick(joystick_r_analog_0), .dir(rsd0));
+ctl_stick_dirs #(.MODE(0), .THRESH(7'd48)) rstick_p2(.stick(joystick_r_analog_1), .dir(rsd1));
+wire [3:0] rstick0 = {rsd0[2], rsd0[3], rsd0[1], rsd0[0]};  // {D,U,L,R}
+wire [3:0] rstick1 = {rsd1[2], rsd1[3], rsd1[1], rsd1[0]};
 // DS Telejan (release 14): $E600/$E601 read the keyboard mahjong panel row selected by $E413 bits 3:2 (P2 mirrors P1).
 wire cdsteljn_mode = (dongle_type == 4'd1) && (game_id == 8'd14);
 wire [7:0] mahjong_row;
@@ -1249,8 +1268,12 @@ assign in0 = cdsteljn_mode ? mahjong_row
 assign in1 = cdsteljn_mode ? mahjong_row
            : ctower_mode   ? {joystick_1[2], joystick_1[3], joystick_1[1:0], rstick1}
                            : {2'b00, joystick_1[5:4], joystick_1[2], joystick_1[3], joystick_1[1:0]};  // P2 R/L/U/D/B1/B2 active-high, U/D fixed
+// CTL-2026-10-25: original start wiring (pad 2's Start 1P pressed Start 1), replaced below
+// assign in2 = {~(joystick_0[6] | kb_coin1), ~(joystick_1[6] | kb_coin2), 1'b0,
+//               joystick_0[8]|joystick_1[8]|kb_start2, joystick_0[7]|joystick_1[7]|kb_start1, 3'b000}; // Coins, starts
+// CTL-2026-10-25: pads never linked: pad 2's Start 1P (joystick_1[7]) now gives Start 2, not Start 1 (fleet rule).
 assign in2 = {~(joystick_0[6] | kb_coin1), ~(joystick_1[6] | kb_coin2), 1'b0,
-              joystick_0[8]|joystick_1[8]|kb_start2, joystick_0[7]|joystick_1[7]|kb_start1, 3'b000}; // Coins, starts
+              joystick_0[8]|joystick_1[8]|joystick_1[7]|kb_start2, joystick_0[7]|kb_start1, 3'b000}; // Coins, starts
 
 inputs inputs_inst (
 	.clk_sys          (clk_sys),

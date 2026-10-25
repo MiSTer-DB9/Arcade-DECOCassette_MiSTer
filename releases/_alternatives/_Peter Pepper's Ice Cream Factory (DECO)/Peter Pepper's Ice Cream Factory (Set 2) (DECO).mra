@@ -6,7 +6,7 @@
   Metadata $02E00 = 03 27 00  (dongle_type=0x03, game_id=0x27 = DECO release #39, swap_mode=0x00)
 -->
 <misterromdescription>
-    <name>Ice Cream Factory (set 2)</name>
+    <name>Peter Pepper's Ice Cream Factory (Set 2)</name>
     <setname>cppicf2</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

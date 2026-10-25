@@ -6,7 +6,7 @@
   Metadata $02E00 = 03 1C 0A  (dongle_type=0x03, game_id=0x1C = DECO release #28, swap_mode=0x0a)
 -->
 <misterromdescription>
-    <name>Graplop (proto)</name>
+    <name>Graplop (Prototype)</name>
     <setname>cgraplop2</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

@@ -6,7 +6,7 @@
   Metadata $02E00 = 03 1D 06  (dongle_type=0x03, game_id=0x1D = DECO release #29, swap_mode=0x06)
 -->
 <misterromdescription>
-    <name>Rootin Tootin (La-Pa-Pa)</name>
+    <name>La-Pa-Pa</name>
     <setname>clapapa</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

@@ -6,7 +6,7 @@
   Metadata $02E00 = 04 26 00  (dongle_type=0x04, game_id=0x26 = DECO release #38)
 -->
 <misterromdescription>
-    <name>Scrum Try (set 2)</name>
+    <name>Scrum Try (Set 2)</name>
     <setname>cscrtry2</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

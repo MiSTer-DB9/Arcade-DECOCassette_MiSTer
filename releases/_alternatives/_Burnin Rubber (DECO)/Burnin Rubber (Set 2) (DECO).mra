@@ -6,7 +6,7 @@
   Metadata $02E00 = 03 1B 0A  (dongle_type=0x03, game_id=0x1B = DECO release #27, swap_mode=0x0a)
 -->
 <misterromdescription>
-    <name>Burnin Rubber (set 2)</name>
+    <name>Burnin Rubber (Set 2)</name>
     <setname>cburnrub2</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

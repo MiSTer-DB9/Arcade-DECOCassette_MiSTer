@@ -6,7 +6,7 @@
   Metadata $02E00 = 03 20 02  (dongle_type=0x03, game_id=0x20 = DECO release #32, swap_mode=0x02)
 -->
 <misterromdescription>
-    <name>Night Star (set 2)</name>
+    <name>Night Star (Set 2)</name>
     <setname>cnightst2</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

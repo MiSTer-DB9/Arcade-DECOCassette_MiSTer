@@ -21,7 +21,7 @@
     $03000+       cassette
 -->
 <misterromdescription>
-    <name>Pro Golf</name>
+    <name>Tournament Pro Golf</name>
     <setname>cprogolf</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

@@ -6,7 +6,7 @@
   Metadata $02E00 = 01 0D 00  (dongle_type=0x01, game_id=0x0D = DECO release #13)
 -->
 <misterromdescription>
-    <name>Pro Golf (Japan)</name>
+    <name>Tournament Pro Golf (Japan)</name>
     <setname>cprogolfj</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

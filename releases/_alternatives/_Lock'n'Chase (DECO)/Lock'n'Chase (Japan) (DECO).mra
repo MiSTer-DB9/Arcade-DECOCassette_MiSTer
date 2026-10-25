@@ -6,7 +6,7 @@
   Metadata $02E00 = 01 0B 00  (dongle_type=0x01, game_id=0x0B = DECO release #11)
 -->
 <misterromdescription>
-    <name>Lock n Chase (Japan)</name>
+    <name>Lock'n'Chase (Japan)</name>
     <setname>clocknchj</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>
