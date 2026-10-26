@@ -64,6 +64,7 @@ localparam CONF_STR = {
 	"P1O[1],Aspect Ratio,3:4,Original;",
 	"P1O[2],Orientation,Vertical,Horizontal;",
 	"P1O[11],HDMI Flip,Off,On;",
+	"P1O[12],CRT Flip,Off,On;",
 	"P1O[17:15],Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
 	"-;",
 	"P2,Pause Options;",
@@ -1461,12 +1462,17 @@ video_timing video_timing_inst (
 	.vsync_pulse  ()
 );
 
+// CRTFLIP-2026-10-25: mirrored row for the video layers (audio NMI / vblank keep the real vcnt). See video_crtflip.v.
+wire       crt_flip = status[12];
+wire [8:0] vcnt_v   = crt_flip ? (9'd254 - vcnt) : vcnt;
+
 // FG tilemap (task 08)
 video_fg video_fg_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.cpu_we_fg         (cpu_we_fgvram),
 	.cpu_we_col        (cpu_we_colram),
 	.cpu_we_char_p0    (charram_we_p0),
@@ -1484,7 +1490,8 @@ video_bg video_bg_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.back_h_shift      (back_h_shift_reg),
 	.back_vl_shift     (back_vl_shift_reg),
 	.back_vr_shift     (back_vr_shift_reg),
@@ -1507,7 +1514,8 @@ video_sprites video_sprites_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.color_center_bot  (color_center_bot_reg),
 	.cpu_we_spr        (cpu_we_fgvram),
 	// SPRITE-DESC-SWIZZLE-FIX-2026-06-11: was `.cpu_spr_addr(cpu_addr[9:0])` (raw). DIAG-REVERT: restore raw.
@@ -1532,7 +1540,8 @@ video_missiles video_missiles_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.color_missiles    (color_missiles_reg),   // MISSILES-IMPL-2026-06-28: was 8'h00 (stubbed)
 	.cpu_we_mis        (cpu_we_colram),
 	// MISSILES-DESC-SWIZZLE-FIX-2026-06-28: was `.cpu_mis_addr(cpu_addr[9:0])` (raw). DIAG-REVERT: restore raw.
@@ -1546,9 +1555,14 @@ video_missiles video_missiles_inst (
 wire [3:0] core_r_hi, core_g_hi, core_b_hi;
 wire [5:0] mixer_pen;
 wire       mixer_modulate;
-wire [7:0] core_r = {core_r_hi, core_r_hi};
-wire [7:0] core_g = {core_g_hi, core_g_hi};
-wire [7:0] core_b = {core_b_hi, core_b_hi};
+// CRTFLIP-2026-10-25: originals below; the palette output now goes through the CRT Flip line mirror.
+// wire [7:0] core_r = {core_r_hi, core_r_hi};
+// wire [7:0] core_g = {core_g_hi, core_g_hi};
+// wire [7:0] core_b = {core_b_hi, core_b_hi};
+wire [3:0] crt_r, crt_g, crt_b;
+wire [7:0] core_r = {crt_r, crt_r};
+wire [7:0] core_g = {crt_g, crt_g};
+wire [7:0] core_b = {crt_b, crt_b};
 
 
 // Palette lookup (task 11)
@@ -1605,7 +1619,8 @@ deco_video_mixer deco_video_mixer_inst (
 	.center_h_shift_space   (center_h_shift_space_reg),
 	.center_v_shift         (center_v_shift_reg),
 	.hcnt                   (hcnt),
-	.vcnt                   (vcnt),
+	// .vcnt                   (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt                   (vcnt_v),
 	.out_pen                (mixer_pen),
 	.out_pen_b4_modulate    (mixer_modulate)
 );
@@ -1751,6 +1766,16 @@ wire video_vblank_d = vbl_sr[VID_HV_DELAY-1];
 wire video_hsync_d  = hs_sr[VID_HV_DELAY-1];
 wire video_vsync_d  = vs_sr[VID_HV_DELAY-1];
 // ===== end VIDEO-ALIGN-2026-06-06 =====
+
+// CRTFLIP-2026-10-25: horizontal half of the CRT Flip (captures the displayed window, plays it back mirrored)
+video_crtflip video_crtflip_inst (
+	.clk_sys (clk_sys),
+	.ce_pix  (ce_pix),
+	.en      (crt_flip),
+	.hblank  (video_hblank_d),
+	.rgb_in  ({core_r_hi, core_g_hi, core_b_hi}),
+	.rgb_out ({crt_r, crt_g, crt_b})
+);
 
 screen_rotate screen_rotate (.*);
 

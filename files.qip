@@ -71,6 +71,8 @@ set_global_assignment -name VERILOG_FILE rtl/video/video_sprites.v
 set_global_assignment -name VERILOG_FILE rtl/video/video_missiles.v
 set_global_assignment -name VERILOG_FILE rtl/video/video_palette.v
 set_global_assignment -name VERILOG_FILE rtl/video/video_mixer.v
+# CRTFLIP-2026-10-25: CRT Flip line mirror
+set_global_assignment -name VERILOG_FILE rtl/video/video_crtflip.v
 
 # MCU + tape (phases 15-17)
 set_global_assignment -name VERILOG_FILE rtl/mcu/i8041_top.v
