@@ -70,7 +70,9 @@ localparam CONF_STR = {
 	"P2O[25],Pause when OSD is open,On,Off;",
 	"P2O[26],Dim video after 10s,On,Off;",
 	"-;",
-	"O[29:27],Fast Load,Off,2x,4x,8x,16x;",
+	"O[24],Autosave Hiscores,Off,On;",
+	// "O[29:27],Fast Load,Off,2x,4x,8x,16x;",   (pre-PLAID-2026-10-25)
+	"O[29:27],Fast Load,Off,2x,4x,8x,16x,PLAID;",
 	"O[21:18],SDRAM Clk Phase,Auto,0.0ns,0.7ns,1.3ns,2.0ns,2.6ns,3.3ns,3.9ns,4.6ns,5.2ns,5.9ns,6.5ns,7.2ns,7.8ns,8.5ns,9.1ns;",
 	"-;",
 	"DIP;",
@@ -178,8 +180,24 @@ wire ce_hclk_raw, ce_hclk1_raw, ce_hclk2_raw, ce_hclk4_raw, ce_audio_raw, ce_tap
 wire ce_hclk  = ce_hclk_raw  & ~pause_cpu;   //  6.000 MHz   (8041 MCU CE)
 wire ce_hclk1 = ce_hclk1_raw & ~pause_cpu;   //  3.000 MHz
 wire ce_hclk2 = ce_hclk2_raw & ~pause_cpu;   //  1.500 MHz   (AY-3-8910 x2)
-wire ce_hclk4 = ce_hclk4_raw & ~pause_cpu;   //    750 kHz   (DECO-222 main CPU)
-wire ce_audio = ce_audio_raw & ~pause_cpu;   //    500 kHz   (audio M6502)
+// HISCORE-2026-10-25: hiscore borrows the main CPU bus while hs_pause; hs_hold keeps the 6502 stopped 2 clocks
+// longer so its first read after the access sees its own address again (Konami82 timeplt pause_x pattern).
+wire hs_pause;    // driven by the hiscore instance far below
+wire [15:0] hs_address;
+wire  [7:0] hs_data_in, hs_data_out;
+wire        hs_write_enable;
+reg  [1:0] hs_pause_d = 2'b00;
+always @(posedge clk_sys) hs_pause_d <= {hs_pause_d[0], hs_pause};
+wire hs_hold = hs_pause | (|hs_pause_d);
+// PLAID-2026-10-25: during a PLAID load window (plaid_load, below) both 6502s run 16x.
+wire pl_active, pl_ce_main, pl_ce_audio, pl_restart;
+wire [15:0] pl_cas_addr;
+wire  [7:0] pl_dbb_dout, pl_dbb_sts, pl_e502;
+// wire ce_hclk4 = ce_hclk4_raw & ~pause_cpu;   //    750 kHz   (DECO-222 main CPU)   (pre-HISCORE-2026-10-25)
+// wire ce_hclk4 = ce_hclk4_raw & ~pause_cpu & ~hs_hold;   //    750 kHz   (DECO-222 main CPU)   (pre-PLAID-2026-10-25)
+wire ce_hclk4 = (pl_active ? pl_ce_main : ce_hclk4_raw) & ~pause_cpu & ~hs_hold;   //    750 kHz   (DECO-222 main CPU)
+// wire ce_audio = ce_audio_raw & ~pause_cpu;   //    500 kHz   (audio M6502)   (pre-PLAID-2026-10-25)
+wire ce_audio = (pl_active ? pl_ce_audio : ce_audio_raw) & ~pause_cpu;   //    500 kHz   (audio M6502)
 wire ce_tape  = ce_tape_raw  & ~pause_cpu;   //    4.8 kHz   (cassette streamer / loader)
 wire ce_pix;                                  //  alias of ce_hclk — NOT gated (video must keep running)
 
@@ -304,8 +322,9 @@ wire kb_start2 = kb[7];
 wire kb_coin1  = kb[8];
 wire kb_coin2  = kb[9];
 
-assign ioctl_upload_req = 1'b0;
-assign ioctl_din        = 8'd0;
+// HISCORE-2026-10-25: upload request + din now come from the hiscore instance (dump = ioctl index 4). Stubs were:
+// assign ioctl_upload_req = 1'b0;
+// assign ioctl_din        = 8'd0;
 
 // =========================================================================
 // Phase 03: stubbed core. Every block below gets reworked in later phases.
@@ -329,7 +348,8 @@ assign ioctl_din        = 8'd0;
 // requires a soft reset/reload — a few extra clk_sys cycles of reset extension made no difference.
 // Reverted to the original purely-combinational form.
 // cal_hold keeps the game in reset through the phase sweep
-wire reset = (RESET | status[0] | buttons[1] | ioctl_download | cal_hold);
+// wire reset = (RESET | status[0] | buttons[1] | ioctl_download | cal_hold);   (pre-PLAID-2026-10-25)
+wire reset = (RESET | status[0] | buttons[1] | ioctl_download | cal_hold | pl_restart);   // pl_restart: PLAID toggled mid-load
 // PAUSE-LOAD-2026-06-28: pause uses a reset WITHOUT ioctl_download so it can engage DURING the cassette load too
 // (user wants the loader pausable — pause works post-load but the `| ioctl_download` above killed it during the load).
 // Safe: the SD->SDRAM write path is NOT gated by pause_cpu, so the transfer still finishes; only the CPUs/8041/
@@ -746,7 +766,12 @@ decocass decocass_inst (
 	.center_h_shift_space_reg (center_h_shift_space_reg),
 	.center_v_shift_reg    (center_v_shift_reg),
 	.coin_counter_reg      (coin_counter_reg),
-	.nmi_reset_reg         (nmi_reset_reg)
+	.nmi_reset_reg         (nmi_reset_reg),
+	.hs_access             (hs_pause),          // HISCORE-2026-10-25: hiscore owns the CPU bus while it pauses the CPU
+	.hs_addr               (hs_address),
+	.hs_din                (hs_data_in),
+	.hs_we                 (hs_write_enable),
+	.hs_dout               (hs_data_out)
 );
 
 // =========================================================================
@@ -785,7 +810,8 @@ i8041_top i8041_inst (
 	.ce_hclk         (ce_hclk_mcu),
 	.clk_8041        (clk_8041),
 	.reset_n         (~reset),
-	.cs_n            (mcu_cs_n),
+	// .cs_n            (mcu_cs_n),   (pre-PLAID-2026-10-25)
+	.cs_n            (mcu_cs_n | pl_active),   // PLAID: real 8041 sees no host traffic during the load window
 	.rd_n            (mcu_rd_n),
 	.wr_n            (mcu_wr_n),
 	.a0              (mcu_a0),
@@ -925,7 +951,8 @@ dpram #(.address_width(16), .data_width(8)) cassette_bram (
 
     .clock_b   (clk_sys),
     .enable_b  (1'b1),
-    .address_b (tape_image_addr[15:0]),
+    // .address_b (tape_image_addr[15:0]),   (pre-PLAID-2026-10-25)
+    .address_b (pl_active ? pl_cas_addr : tape_image_addr[15:0]),   // PLAID reads blocks; tape is idle then
     .data_b    (8'h00),
     .wren_b    (1'b0),
     .q_b       (tape_image_q)
@@ -971,10 +998,12 @@ dongle_mux dongle_mux_inst (
 	.dprom_q           (dprom_q),
 	// 2026-05-18 — dongle reads MCU host-bus registers per MAME
 	// `upi41_master_r(0)/(1)`. mcu_dbb_sts faked as OBF=mcu_host_dout_oe.
-	.mcu_dbb_dout      (mcu_host_dout),
+	// .mcu_dbb_dout      (mcu_host_dout),   (pre-PLAID-2026-10-25)
+	.mcu_dbb_dout      (pl_active ? pl_dbb_dout : mcu_host_dout),   // PLAID stands in for the 8041 in the window
 	// DBBSTS exposure 2026-05-30: real STATUS reg (sts/f1/f0/IBF/OBF) from the i8041 core —
 	// was faked as {6'b0,IBF=0,OBF=host_dout_oe}. Needed for the BIOS<->MCU tape handshake.
-	.mcu_dbb_sts       (mcu_host_sts),
+	// .mcu_dbb_sts       (mcu_host_sts),   (pre-PLAID-2026-10-25)
+	.mcu_dbb_sts       (pl_active ? pl_dbb_sts : mcu_host_sts),
 	.mcu_status_d2     (mcu_p2_out[2]),
 	.mcu_status_d0     (mcu_p2_out[0])
 );
@@ -1020,7 +1049,10 @@ assign dongle_din_low4 = dongle_din_full[3:0];
 // assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
 //                    : (dongle_type == 4'd7) ? dongle_din_full             // $E5x0/1 = Darksoft dongle (raw)
 //                    : (mcu_host_sts[0] ? dongle_din_full : 8'h00);        // $E5x0/1 = legacy OBF-gated 8041 data
-assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
+// PLAID-2026-10-25: original below; the window swaps in plaid_load's $E502 status byte.
+// assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
+//                    : dongle_din_full;                                    // $E5x0/1 = dongle data, ALL types UNGATED (MAME m_dongle_r)
+assign e5xx_to_cpu = cpu_addr[1] ? (pl_active ? pl_e502 : e5xx_dongle)    // $E5x2/3 = STATUS byte, ALL types (MAME)
                    : dongle_din_full;                                    // $E5x0/1 = dongle data, ALL types UNGATED (MAME m_dongle_r)
 
 // UNIFIED dongle storage: ALL dongle types read from DDR3 (below). The legacy 4 KB BRAM is gone.
@@ -1590,13 +1622,83 @@ pause #(8,8,8,24) pause_inst (
 	.reset         (pause_reset),   // PAUSE-LOAD-2026-06-28: excl. ioctl_download → pause works during the cassette load
 	.OSD_STATUS    (OSD_STATUS),
 	.user_button   (m_pause),
-	.pause_request (1'b0),
+	// .pause_request (1'b0),   (pre-HISCORE-2026-10-25)
+	.pause_request (hs_pause),
 	.options       (~status[26:25]),  // [0]=pause when OSD open; [1]=dim video after 10s
 	.r             (core_r),
 	.g             (core_g),
 	.b             (core_b),
 	.pause_cpu     (pause_cpu),
 	.rgb_out       (rgb_pause)
+);
+
+// =========================================================================
+// HISCORE-2026-10-25: config = MRA index 3, dump = index 4; RAM through the CPU bus (decocass.v hs_*).
+// The cassette load writes RAM $0000-$5FFF, so a restore before the game runs gets overwritten (user 2026-10-25).
+// hiscore.v arms its restore on the falling edge of its reset, so hold that reset until the BIOS hands over to
+// the game: the first opcode fetch below $F000 (cflyball trace: JMP $F146 -> $0503 after the load + rewind).
+// =========================================================================
+reg hs_game_run = 1'b0;
+always @(posedge clk_sys) begin
+	if (reset)                                                hs_game_run <= 1'b0;
+	else if (cpu_sync && ce_hclk4 && cpu_addr < 16'hF000)     hs_game_run <= 1'b1;
+end
+wire hs_reset = reset | ~hs_game_run;
+// HISCORE-OSD-2026-10-25: hiscore.v extracts on every OSD open, even while held in reset. During the (minutes-long)
+// load that copied mid-load RAM over the downloaded scores and autosaved it (HW: restore = garbage; sim: 27/36 bytes).
+// So the OSD only reaches it once the game runs, 2 clocks late so its reset release (restore pending) comes first.
+reg [1:0] hs_game_run_d = 2'b00;
+always @(posedge clk_sys) hs_game_run_d <= {hs_game_run_d[0], hs_game_run};
+
+// PLAID-2026-10-25: Fast Load = PLAID -> instant load (rtl/mcu/plaid_load.v). Window = reset .. hs_game_run.
+// Not for the tapeless multigames (Darksoft 7 / Widel 8).
+plaid_load plaid_load_inst (
+	.clk_sys       (clk_sys),
+	.reset         (reset),
+	.sel           ((status[29:27] == 3'd5) && (dongle_type != 4'd7) && (dongle_type != 4'd8)),
+	.game_run      (hs_game_run),
+	.restart       (pl_restart),
+	.active        (pl_active),
+	.ce_main_fast  (pl_ce_main),
+	.ce_audio_fast (pl_ce_audio),
+	.cpu_re        (cpu_re_e5xx),
+	.cpu_we        (cpu_we_e5xx),
+	.cpu_addr_lo   (cpu_addr[7:0]),
+	.cpu_dout      (cpu_dout),
+	.cas_addr      (pl_cas_addr),
+	.cas_q         (tape_image_q),
+	.dbb_dout      (pl_dbb_dout),
+	.dbb_sts       (pl_dbb_sts),
+	.e502          (pl_e502)
+);
+
+hiscore #(
+	.HS_ADDRESSWIDTH(16),
+	.CFG_ADDRESSWIDTH(4),
+	.CFG_LENGTHWIDTH(2)
+) hi (
+	.clk              (clk_sys),
+	.paused           (pause_cpu),
+	.reset            (hs_reset),
+	.autosave         (status[24]),
+	.ioctl_upload     (ioctl_upload),
+	.ioctl_upload_req (ioctl_upload_req),
+	.ioctl_download   (ioctl_download),
+	.ioctl_wr         (ioctl_wr),
+	.ioctl_addr       (ioctl_addr),
+	.ioctl_index      (ioctl_index),
+	// .OSD_STATUS       (OSD_STATUS),   (pre-HISCORE-OSD-2026-10-25)
+	.OSD_STATUS       (OSD_STATUS & hs_game_run_d[1]),
+	.data_from_hps    (ioctl_dout),
+	.data_from_ram    (hs_data_out),
+	.ram_address      (hs_address),
+	.data_to_hps      (ioctl_din),
+	.data_to_ram      (hs_data_in),
+	.ram_write        (hs_write_enable),
+	.ram_intent_read  (),
+	.ram_intent_write (),
+	.pause_cpu        (hs_pause),
+	.configured       ()
 );
 
 // =========================================================================

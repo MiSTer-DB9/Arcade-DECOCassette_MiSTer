@@ -77,6 +77,8 @@ set_global_assignment -name VERILOG_FILE rtl/mcu/i8041_top.v
 set_global_assignment -name VERILOG_FILE rtl/mcu/mcu_pmem.v
 set_global_assignment -name VERILOG_FILE rtl/mcu/tape_streamer.v
 set_global_assignment -name VERILOG_FILE rtl/mcu/mcu_tape_iface.v
+# PLAID-2026-10-25: Fast Load = PLAID (instant load: 8041 host-port stand-in + 16x CPUs until game entry)
+set_global_assignment -name VERILOG_FILE rtl/mcu/plaid_load.v
 
 # I/O (phase 23, 24)
 set_global_assignment -name VERILOG_FILE rtl/io/inputs.v
