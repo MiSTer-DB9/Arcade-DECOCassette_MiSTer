@@ -13,7 +13,7 @@
   index 2: decocrom overlay-PCB ROM (deco-ti.x1..x4, 16 KB — SAME chips as set 1).
 -->
 <misterromdescription>
-    <name>Treasure Island (US) (set 2)</name>
+    <name>Treasure Island (Set 2)</name>
     <setname>ctisland2</setname>
     <rbf>DECOCassette</rbf>
     <mameversion>0268</mameversion>

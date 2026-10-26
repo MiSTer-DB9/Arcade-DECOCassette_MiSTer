@@ -151,7 +151,15 @@ module decocass (
     output wire [7:0]  center_h_shift_space_reg, // $E411
     output wire [7:0]  center_v_shift_reg,  // $E412
     output wire [7:0]  coin_counter_reg,  // $E413
-    output wire [7:0]  nmi_reset_reg      // $E417
+    output wire [7:0]  nmi_reset_reg,     // $E417
+
+    // HISCORE-2026-10-25: while hs_access (hiscore holds the CPU paused) the hiscore module owns the CPU bus,
+    // so its reads/writes go through the normal decode (work/char/video/object RAM, mirror swizzle, shadows).
+    input  wire        hs_access,
+    input  wire [15:0] hs_addr,
+    input  wire [7:0]  hs_din,
+    input  wire        hs_we,
+    output wire [7:0]  hs_dout
 );
 
     //------------------------------------------------------------------------
@@ -160,9 +168,9 @@ module decocass (
     // Enable input: ce_main (750 kHz = HCLK4, active for one clk_sys cycle)
     //------------------------------------------------------------------------
 
-    wire [15:0] cpu_addr_int;
-    wire [7:0]  cpu_dout_int;
-    wire        cpu_rw_n_int;
+    wire [15:0] cpu_addr_core;
+    wire [7:0]  cpu_dout_core;
+    wire        cpu_rw_n_core;
     wire        cpu_sync_int;
     wire [7:0]  cpu_din;              // local: mux output -> CPU .di
 
@@ -173,12 +181,19 @@ module decocass (
         .nmi_n   (~cpu_nmi_req),       // VBLANK-rising NMI; cleared by $E417 write
         .irq_n   (1'b1),               // No IRQ input for now
         .rdy     (1'b1),               // Always ready
-        .addr    (cpu_addr_int),
+        .addr    (cpu_addr_core),
         .di      (cpu_din),
-        .do      (cpu_dout_int),
-        .rw_n    (cpu_rw_n_int),
+        .do      (cpu_dout_core),
+        .rw_n    (cpu_rw_n_core),
         .sync    (cpu_sync_int)
     );
+
+    // HISCORE-2026-10-25: bus = hiscore while hs_access, else the CPU. ce_main is gated off during hs_access, so
+    // hs writes use ram_wr_ce on the RAM write enables only (registers, $E5xx/$E7xx strobes never see them).
+    wire [15:0] cpu_addr_int = hs_access ? hs_addr : cpu_addr_core;
+    wire [7:0]  cpu_dout_int = hs_access ? hs_din  : cpu_dout_core;
+    wire        cpu_rw_n_int = hs_access ? ~hs_we  : cpu_rw_n_core;
+    wire        ram_wr_ce    = hs_access ? hs_we   : ce_main;
 
     //------------------------------------------------------------------------
     // Main CPU NMI generation — MAME-faithful (decocass_m.cpp:150-159).
@@ -277,7 +292,7 @@ module decocass (
     // rambase: $0000-$5FFF (24K, 15-bit address space)
     assign ram_addr_w   = cpu_addr_int[14:0];
     assign ram_dw       = cpu_dout_int;
-    assign ram_we_w     = (sel_ram && !cpu_rw_n_int && ce_main);
+    assign ram_we_w     = (sel_ram && !cpu_rw_n_int && ram_wr_ce);
 
     // charram: $6000-$BFFF (24 KB total — 3 planes × 8 KB).
     //
@@ -304,9 +319,9 @@ module decocass (
     // assign charram_addr_w = cpu_addr_int[12:0];
     assign charram_addr_w = cpu_addr_int - 16'h6000;
     assign charram_dw     = cpu_dout_int;
-    assign charram_we_p0  = (sel_charram_p0 && !cpu_rw_n_int && ce_main);
-    assign charram_we_p1  = (sel_charram_p1 && !cpu_rw_n_int && ce_main);
-    assign charram_we_p2  = (sel_charram_p2 && !cpu_rw_n_int && ce_main);
+    assign charram_we_p0  = (sel_charram_p0 && !cpu_rw_n_int && ram_wr_ce);
+    assign charram_we_p1  = (sel_charram_p1 && !cpu_rw_n_int && ram_wr_ce);
+    assign charram_we_p2  = (sel_charram_p2 && !cpu_rw_n_int && ram_wr_ce);
 
     // fgvideoram and mirror: $C000-$C3FF, $C800-$CBFF (1K)
     // Normal: address = cpu_addr[9:0]
@@ -314,23 +329,23 @@ module decocass (
     wire [9:0] fgvram_addr_eff = sel_fgvram_m ? swiz(cpu_addr_int[9:0]) : cpu_addr_int[9:0];
     assign fgvram_addr_w = fgvram_addr_eff;
     assign fgvram_dw     = cpu_dout_int;
-    assign fgvram_we_w   = ((sel_fgvram || sel_fgvram_m) && !cpu_rw_n_int && ce_main);
+    assign fgvram_we_w   = ((sel_fgvram || sel_fgvram_m) && !cpu_rw_n_int && ram_wr_ce);
 
     // colorram and mirror: $C400-$C7FF, $CC00-$CFFF (1K)
     wire [9:0] colram_addr_eff = sel_colram_m ? swiz(cpu_addr_int[9:0]) : cpu_addr_int[9:0];
     assign colram_addr_w = colram_addr_eff;
     assign colram_dw     = cpu_dout_int;
-    assign colram_we_w   = ((sel_colram || sel_colram_m) && !cpu_rw_n_int && ce_main);
+    assign colram_we_w   = ((sel_colram || sel_colram_m) && !cpu_rw_n_int && ram_wr_ce);
 
     // tileram: $D000-$D7FF (2K, 11-bit address space)
     assign tilram_addr_w = cpu_addr_int[10:0];
     assign tilram_dw     = cpu_dout_int;
-    assign tilram_we_w   = (sel_tilram && !cpu_rw_n_int && ce_main);
+    assign tilram_we_w   = (sel_tilram && !cpu_rw_n_int && ram_wr_ce);
 
     // objectram: $D800-$DBFF (1K, 10-bit address space)
     assign objram_addr_w = cpu_addr_int[9:0];
     assign objram_dw     = cpu_dout_int;
-    assign objram_we_w   = (sel_objram && !cpu_rw_n_int && ce_main);
+    assign objram_we_w   = (sel_objram && !cpu_rw_n_int && ram_wr_ce);
 
     // paletteram: $E000-$E0FF (CPU readback dpram, no XOR — MAME stores
     // the raw byte at `m_paletteram[offset]` so CPU readback returns the
@@ -338,7 +353,7 @@ module decocass (
     // the video-side palette (see Arcade-DECOCassette.sv video_palette_inst).
     assign palram_addr_w = cpu_addr_int[7:0];
     assign palram_dw     = cpu_dout_int;
-    assign palram_we_w   = (sel_palram && !cpu_rw_n_int && ce_main);
+    assign palram_we_w   = (sel_palram && !cpu_rw_n_int && ram_wr_ce);
 
     // BIOS ROM: $F000-$FFFF (4K, 12-bit address space)
     // ROM is read-only, but expose a write port for the rom_loader in task 25
@@ -533,5 +548,35 @@ module decocass (
     //------------------------------------------------------------------------
 
     assign cpu_din = cpu_din_mux;
+    // HISCORE-TIMING-2026-10-25: hiscore.v samples data_from_ram ONE clock after it sets the address, at full
+    // clk_sys rate. Through cpu_din_mux that clock held the hs_access address mux + the 16-bit casez decode + the
+    // $E5xx/tape_streamer inputs: STA -4..-8.6 ns into hiscore:hi (HW: restore/save corrupted, sim fine). Now the
+    // region select is registered from hs_addr in the address clock, so the data clock is BRAM q -> small mux only.
+    // assign hs_dout = cpu_din_mux;   // HISCORE-2026-10-25 original
+    reg [2:0] hs_sel_r;
+    always @(posedge clk_sys) begin
+        casez (hs_addr)
+            16'b00??_????_????_????,
+            16'b0100_????_????_????,
+            16'b0101_????_????_????:        hs_sel_r <= 3'd0;   // work RAM  $0000-$5FFF
+            16'b011?_????_????_????,
+            16'b100?_????_????_????,
+            16'b1010_????_????_????,
+            16'b1011_????_????_????:        hs_sel_r <= 3'd1;   // charram   $6000-$BFFF (bank 0)
+            16'b1100_?0??_????_????:        hs_sel_r <= 3'd2;   // fgvram    $C000 / mirror $C800
+            16'b1100_?1??_????_????:        hs_sel_r <= 3'd3;   // colorram  $C400 / mirror $CC00
+            16'b1101_0???_????_????:        hs_sel_r <= 3'd4;   // tileram   $D000-$D7FF
+            16'b1101_10??_????_????:        hs_sel_r <= 3'd5;   // objectram $D800-$DBFF
+            16'b1110_0000_????_????:        hs_sel_r <= 3'd6;   // palette   $E000-$E0FF
+            default:                        hs_sel_r <= 3'd7;
+        endcase
+    end
+    assign hs_dout = (hs_sel_r == 3'd0) ? ram_q     :
+                     (hs_sel_r == 3'd1) ? charram_q :
+                     (hs_sel_r == 3'd2) ? fgvram_q  :
+                     (hs_sel_r == 3'd3) ? colram_q  :
+                     (hs_sel_r == 3'd4) ? tilram_q  :
+                     (hs_sel_r == 3'd5) ? objram_q  :
+                     (hs_sel_r == 3'd6) ? palram_q  : 8'hFF;
 
 endmodule

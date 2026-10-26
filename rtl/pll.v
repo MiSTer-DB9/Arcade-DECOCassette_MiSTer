@@ -16,7 +16,7 @@ module pll (
     input  wire refclk,
     input  wire rst,
     output wire outclk_0,
-    // DIAG-REVERT-2026-10-13: outclk_1 (SDRAM clock) and the reconfig ports exposed for sys/pll_cfg DPS
+    // outclk_1 = SDRAM clock; reconfig ports go to sys/pll_cfg (DPS)
     output wire outclk_1,
     output wire locked,
     input  wire [63:0] reconfig_to_pll,
@@ -27,14 +27,9 @@ module pll (
         .refclk            (refclk),
         .rst               (rst),
         .outclk_0          (outclk_0),
-        // DIAG-REVERT-2026-10-13: original below
-        // .outclk_1          (),
         .outclk_1          (outclk_1),
         .outclk_2          (),
         .locked            (locked),
-        // DIAG-REVERT-2026-10-13: original below
-        // .reconfig_to_pll   (64'd0),
-        // .reconfig_from_pll ()
         .reconfig_to_pll   (reconfig_to_pll),
         .reconfig_from_pll (reconfig_from_pll)
     );

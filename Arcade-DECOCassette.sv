@@ -222,14 +222,16 @@ localparam CONF_STR = {
 	"P1O[1],Aspect Ratio,3:4,Original;",
 	"P1O[2],Orientation,Vertical,Horizontal;",
 	"P1O[11],HDMI Flip,Off,On;",
+	"P1O[12],CRT Flip,Off,On;",
 	"P1O[17:15],Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
 	"-;",
 	"P2,Pause Options;",
 	"P2O[25],Pause when OSD is open,On,Off;",
 	"P2O[26],Dim video after 10s,On,Off;",
 	"-;",
-	"O[29:27],Fast Load,Off,2x,4x,8x,16x;",
-	// DIAG-REVERT-2026-10-13: SDRAM clock phase option added
+	"O[24],Autosave Hiscores,Off,On;",
+	// "O[29:27],Fast Load,Off,2x,4x,8x,16x;",   (pre-PLAID-2026-10-25)
+	"O[29:27],Fast Load,Off,2x,4x,8x,16x,PLAID;",
 	"O[21:18],SDRAM Clk Phase,Auto,0.0ns,0.7ns,1.3ns,2.0ns,2.6ns,3.3ns,3.9ns,4.6ns,5.2ns,5.9ns,6.5ns,7.2ns,7.8ns,8.5ns,9.1ns;",
 	"-;",
 	// [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
@@ -256,14 +258,6 @@ localparam CONF_STR = {
 wire clk_sys;
 wire pll_locked;
 
-// DIAG-REVERT-2026-10-13: original PLL instance commented out below
-// pll pll
-// (
-//     .refclk   (CLK_50M),
-//     .rst      (1'b0),
-//     .outclk_0 (clk_sys),
-//     .locked   (pll_locked)
-// );
 wire        CLK_SDRAM;          // 96 MHz, same as clk_sys at phase position 0
 wire [63:0] reconfig_to_pll, reconfig_from_pll;
 
@@ -278,7 +272,7 @@ pll pll
     .reconfig_from_pll (reconfig_from_pll)
 );
 
-// DIAG-REVERT-2026-10-13: SDRAM clock phase block added. One DPS step = VCO/8 = 163 ps
+// SDRAM clock phase. One DPS step = VCO/8 = 163 ps
 // (768 MHz VCO), 64 per 96 MHz period; manual OSD entries are 4 steps. Auto: the dongle
 // SDRAM path below sweeps all 64 after a dongle load and parks mid-window.
 wire        cfg_waitrequest, cfg_write;
@@ -349,8 +343,24 @@ wire ce_hclk_raw, ce_hclk1_raw, ce_hclk2_raw, ce_hclk4_raw, ce_audio_raw, ce_tap
 wire ce_hclk  = ce_hclk_raw  & ~pause_cpu;   //  6.000 MHz   (8041 MCU CE)
 wire ce_hclk1 = ce_hclk1_raw & ~pause_cpu;   //  3.000 MHz
 wire ce_hclk2 = ce_hclk2_raw & ~pause_cpu;   //  1.500 MHz   (AY-3-8910 x2)
-wire ce_hclk4 = ce_hclk4_raw & ~pause_cpu;   //    750 kHz   (DECO-222 main CPU)
-wire ce_audio = ce_audio_raw & ~pause_cpu;   //    500 kHz   (audio M6502)
+// HISCORE-2026-10-25: hiscore borrows the main CPU bus while hs_pause; hs_hold keeps the 6502 stopped 2 clocks
+// longer so its first read after the access sees its own address again (Konami82 timeplt pause_x pattern).
+wire hs_pause;    // driven by the hiscore instance far below
+wire [15:0] hs_address;
+wire  [7:0] hs_data_in, hs_data_out;
+wire        hs_write_enable;
+reg  [1:0] hs_pause_d = 2'b00;
+always @(posedge clk_sys) hs_pause_d <= {hs_pause_d[0], hs_pause};
+wire hs_hold = hs_pause | (|hs_pause_d);
+// PLAID-2026-10-25: during a PLAID load window (plaid_load, below) both 6502s run 16x.
+wire pl_active, pl_ce_main, pl_ce_audio, pl_restart;
+wire [15:0] pl_cas_addr;
+wire  [7:0] pl_dbb_dout, pl_dbb_sts, pl_e502;
+// wire ce_hclk4 = ce_hclk4_raw & ~pause_cpu;   //    750 kHz   (DECO-222 main CPU)   (pre-HISCORE-2026-10-25)
+// wire ce_hclk4 = ce_hclk4_raw & ~pause_cpu & ~hs_hold;   //    750 kHz   (DECO-222 main CPU)   (pre-PLAID-2026-10-25)
+wire ce_hclk4 = (pl_active ? pl_ce_main : ce_hclk4_raw) & ~pause_cpu & ~hs_hold;   //    750 kHz   (DECO-222 main CPU)
+// wire ce_audio = ce_audio_raw & ~pause_cpu;   //    500 kHz   (audio M6502)   (pre-PLAID-2026-10-25)
+wire ce_audio = (pl_active ? pl_ce_audio : ce_audio_raw) & ~pause_cpu;   //    500 kHz   (audio M6502)
 wire ce_tape  = ce_tape_raw  & ~pause_cpu;   //    4.8 kHz   (cassette streamer / loader)
 wire ce_pix;                                  //  alias of ce_hclk — NOT gated (video must keep running)
 
@@ -548,23 +558,35 @@ assign joystick_1 = joydb_2ena ? (OSD_STATUS ? 16'b0 : joydb_2_mapped) : joydb_1
 // [MiSTer-DB9-Pro END]
 
 // Keyboard coin/start (MAME defaults): 1 = 1P Start, 2 = 2P Start, 5 = Coin 1, 6 = Coin 2.
-reg kb_start1 = 0, kb_start2 = 0, kb_coin1 = 0, kb_coin2 = 0;
-reg kb_old_toggle = 0;
-always @(posedge clk_sys) begin
-	kb_old_toggle <= ps2_key[10];
-	if (kb_old_toggle != ps2_key[10] && !ps2_key[8]) begin
-		case (ps2_key[7:0])
-			8'h16: kb_start1 <= ps2_key[9];
-			8'h1E: kb_start2 <= ps2_key[9];
-			8'h2E: kb_coin1  <= ps2_key[9];
-			8'h36: kb_coin2  <= ps2_key[9];
-			default: ;
-		endcase
-	end
-end
+// CTL-2026-10-25: original keyboard block, replaced by ctl_keyboard below
+// reg kb_start1 = 0, kb_start2 = 0, kb_coin1 = 0, kb_coin2 = 0;
+// reg kb_old_toggle = 0;
+// always @(posedge clk_sys) begin
+// 	kb_old_toggle <= ps2_key[10];
+// 	if (kb_old_toggle != ps2_key[10] && !ps2_key[8]) begin
+// 		case (ps2_key[7:0])
+// 			8'h16: kb_start1 <= ps2_key[9];
+// 			8'h1E: kb_start2 <= ps2_key[9];
+// 			8'h2E: kb_coin1  <= ps2_key[9];
+// 			8'h36: kb_coin2  <= ps2_key[9];
+// 			default: ;
+// 		endcase
+// 	end
+// end
+// CTL-2026-10-25: keyboard -> controllers.sv ctl_keyboard. STD_EXT 1 = these keys need the non-extended code, exactly the
+// old `!ps2_key[8]` gate. kb[6] 1, kb[7] 2, kb[8] 5, kb[9] 6. No toggle keys, so pause changes nothing.
+wire [12:0] kb;
+/* verilator lint_off PINCONNECTEMPTY */
+ctl_keyboard #(.STD_EXT(1)) keyboard(.clk(clk_sys), .ps2_key(ps2_key), .pause(pause_cpu), .kb(kb), .kbx());
+/* verilator lint_on PINCONNECTEMPTY */
+wire kb_start1 = kb[6];
+wire kb_start2 = kb[7];
+wire kb_coin1  = kb[8];
+wire kb_coin2  = kb[9];
 
-assign ioctl_upload_req = 1'b0;
-assign ioctl_din        = 8'd0;
+// HISCORE-2026-10-25: upload request + din now come from the hiscore instance (dump = ioctl index 4). Stubs were:
+// assign ioctl_upload_req = 1'b0;
+// assign ioctl_din        = 8'd0;
 
 // =========================================================================
 // Phase 03: stubbed core. Every block below gets reworked in later phases.
@@ -587,9 +609,9 @@ assign ioctl_din        = 8'd0;
 // between the CPU coming out of reset and the SDRAM read-prefetch servicing dongle address 0. HW: still
 // requires a soft reset/reload — a few extra clk_sys cycles of reset extension made no difference.
 // Reverted to the original purely-combinational form.
-// DIAG-REVERT-2026-10-13: original below — cal_hold keeps the game in reset through the phase sweep
-// wire reset = (RESET | status[0] | buttons[1] | ioctl_download);
-wire reset = (RESET | status[0] | buttons[1] | ioctl_download | cal_hold);
+// cal_hold keeps the game in reset through the phase sweep
+// wire reset = (RESET | status[0] | buttons[1] | ioctl_download | cal_hold);   (pre-PLAID-2026-10-25)
+wire reset = (RESET | status[0] | buttons[1] | ioctl_download | cal_hold | pl_restart);   // pl_restart: PLAID toggled mid-load
 // PAUSE-LOAD-2026-06-28: pause uses a reset WITHOUT ioctl_download so it can engage DURING the cassette load too
 // (user wants the loader pausable — pause works post-load but the `| ioctl_download` above killed it during the load).
 // Safe: the SD->SDRAM write path is NOT gated by pause_cpu, so the transfer still finishes; only the CPUs/8041/
@@ -1006,7 +1028,12 @@ decocass decocass_inst (
 	.center_h_shift_space_reg (center_h_shift_space_reg),
 	.center_v_shift_reg    (center_v_shift_reg),
 	.coin_counter_reg      (coin_counter_reg),
-	.nmi_reset_reg         (nmi_reset_reg)
+	.nmi_reset_reg         (nmi_reset_reg),
+	.hs_access             (hs_pause),          // HISCORE-2026-10-25: hiscore owns the CPU bus while it pauses the CPU
+	.hs_addr               (hs_address),
+	.hs_din                (hs_data_in),
+	.hs_we                 (hs_write_enable),
+	.hs_dout               (hs_data_out)
 );
 
 // =========================================================================
@@ -1045,7 +1072,8 @@ i8041_top i8041_inst (
 	.ce_hclk         (ce_hclk_mcu),
 	.clk_8041        (clk_8041),
 	.reset_n         (~reset),
-	.cs_n            (mcu_cs_n),
+	// .cs_n            (mcu_cs_n),   (pre-PLAID-2026-10-25)
+	.cs_n            (mcu_cs_n | pl_active),   // PLAID: real 8041 sees no host traffic during the load window
 	.rd_n            (mcu_rd_n),
 	.wr_n            (mcu_wr_n),
 	.a0              (mcu_a0),
@@ -1185,7 +1213,8 @@ dpram #(.address_width(16), .data_width(8)) cassette_bram (
 
     .clock_b   (clk_sys),
     .enable_b  (1'b1),
-    .address_b (tape_image_addr[15:0]),
+    // .address_b (tape_image_addr[15:0]),   (pre-PLAID-2026-10-25)
+    .address_b (pl_active ? pl_cas_addr : tape_image_addr[15:0]),   // PLAID reads blocks; tape is idle then
     .data_b    (8'h00),
     .wren_b    (1'b0),
     .q_b       (tape_image_q)
@@ -1231,10 +1260,12 @@ dongle_mux dongle_mux_inst (
 	.dprom_q           (dprom_q),
 	// 2026-05-18 — dongle reads MCU host-bus registers per MAME
 	// `upi41_master_r(0)/(1)`. mcu_dbb_sts faked as OBF=mcu_host_dout_oe.
-	.mcu_dbb_dout      (mcu_host_dout),
+	// .mcu_dbb_dout      (mcu_host_dout),   (pre-PLAID-2026-10-25)
+	.mcu_dbb_dout      (pl_active ? pl_dbb_dout : mcu_host_dout),   // PLAID stands in for the 8041 in the window
 	// DBBSTS exposure 2026-05-30: real STATUS reg (sts/f1/f0/IBF/OBF) from the i8041 core —
 	// was faked as {6'b0,IBF=0,OBF=host_dout_oe}. Needed for the BIOS<->MCU tape handshake.
-	.mcu_dbb_sts       (mcu_host_sts),
+	// .mcu_dbb_sts       (mcu_host_sts),   (pre-PLAID-2026-10-25)
+	.mcu_dbb_sts       (pl_active ? pl_dbb_sts : mcu_host_sts),
 	.mcu_status_d2     (mcu_p2_out[2]),
 	.mcu_status_d0     (mcu_p2_out[0])
 );
@@ -1280,7 +1311,10 @@ assign dongle_din_low4 = dongle_din_full[3:0];
 // assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
 //                    : (dongle_type == 4'd7) ? dongle_din_full             // $E5x0/1 = Darksoft dongle (raw)
 //                    : (mcu_host_sts[0] ? dongle_din_full : 8'h00);        // $E5x0/1 = legacy OBF-gated 8041 data
-assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
+// PLAID-2026-10-25: original below; the window swaps in plaid_load's $E502 status byte.
+// assign e5xx_to_cpu = cpu_addr[1] ? e5xx_dongle                           // $E5x2/3 = STATUS byte, ALL types (MAME)
+//                    : dongle_din_full;                                    // $E5x0/1 = dongle data, ALL types UNGATED (MAME m_dongle_r)
+assign e5xx_to_cpu = cpu_addr[1] ? (pl_active ? pl_e502 : e5xx_dongle)    // $E5x2/3 = STATUS byte, ALL types (MAME)
                    : dongle_din_full;                                    // $E5x0/1 = dongle data, ALL types UNGATED (MAME m_dongle_r)
 
 // UNIFIED dongle storage: ALL dongle types read from DDR3 (below). The legacy 4 KB BRAM is gone.
@@ -1345,7 +1379,7 @@ reg         wr_req_pend;
 reg  [20:0] wr_req_addr;
 reg  [7:0]  wr_req_data;
 
-// ---- SDRAM clock phase calibration (DIAG-REVERT-2026-10-13: block added) ----
+// ---- SDRAM clock phase calibration ----
 // Reference = the dongle region (index 1, SDRAM word 0 up), checksummed as it downloads.
 // This path always reads at completion (Normal), so only Normal may win the sweep.
 wire        cal_busy, cal_rd_go;
@@ -1375,8 +1409,7 @@ sdram_phase_cal #(.POS(7'd64), .LATCH_MASK(4'b0010), .QUIET_BITS(22)) phase_cal
 
 
 // Throttle the HPS while a dongle write is requested/in-flight (combinational so it lands in time).
-// DIAG-REVERT-2026-10-13: original below — cal_busy holds the HPS while an aborted sweep restores the phase
-// assign ioctl_wait = sd_busy || (ioctl_wr && dongle_ld);
+// cal_busy holds the HPS while an aborted sweep restores the phase
 assign ioctl_wait = sd_busy || (ioctl_wr && dongle_ld) || cal_busy;
 
 // SDRAM-HS-FIX-2026-06-10: proper ready-EDGE handshake — mirrors NeoGeo sdram_mux.sv, which drives this
@@ -1390,7 +1423,7 @@ always @(posedge clk_sys) begin
 		sd_rd <= 0; sd_wr <= 0; sd_refresh <= 0; sd_busy <= 0; sd_was_rd <= 0;
 		sd_last_addr <= 20'hFFFFF; sd_refresh_cnt <= 0; sd_old_ready <= 1'b1;
 		wr_req_pend <= 1'b0;
-		sd_cal <= 1'b0;   // DIAG-REVERT-2026-10-13: added
+		sd_cal <= 1'b0;
 	end else begin
 		sd_refresh_cnt <= sd_refresh_cnt + 1'b1;
 		sd_old_ready   <= sd_ready;
@@ -1414,8 +1447,7 @@ always @(posedge clk_sys) begin
 		if (sd_busy) begin
 			// rd/wr COMPLETE = ready back HIGH with the strobe already cleared (it fell, then rose).
 			if (sd_ready && !sd_rd && !sd_wr) begin
-				// DIAG-REVERT-2026-10-13: original below — a calibration read must not land in dprom_q_ddr
-				// if (sd_was_rd) dprom_q_ddr <= sd_last_addr[0] ? sd_dout[15:8] : sd_dout[7:0];
+				// a calibration read must not land in dprom_q_ddr
 				if (sd_was_rd && !sd_cal) dprom_q_ddr <= sd_last_addr[0] ? sd_dout[15:8] : sd_dout[7:0];
 				sd_cal <= 1'b0;
 				sd_busy <= 0;
@@ -1428,21 +1460,18 @@ always @(posedge clk_sys) begin
 				sd_wr       <= 1; sd_busy <= 1; sd_was_rd <= 0;
 				wr_req_pend <= 1'b0;
 				sd_last_addr <= 20'hFFFFF;                         // write invalidates the read cache -> re-fetch after load
-			// DIAG-REVERT-2026-10-13: original below
-			// end else if (!ioctl_download && dprom_addr[19:0] != sd_last_addr) begin   // READ: prefetch
 			end else if (!ioctl_download && !cal_busy && dprom_addr[19:0] != sd_last_addr) begin   // READ: prefetch
 				sd_last_addr <= dprom_addr[19:0];
 				sd_addr  <= {7'd0, dprom_addr[19:1]};
 				sd_rd    <= 1; sd_busy <= 1; sd_was_rd <= 1;
 			end else if (&sd_refresh_cnt) begin                    // periodic AUTO_REFRESH: one-edge toggle
 				sd_refresh <= ~sd_refresh;
-			// DIAG-REVERT-2026-10-13: calibration read issue added
 			end else if (cal_take) begin
 				sd_addr <= {11'd0, cal_rd_word};
 				sd_rd   <= 1; sd_busy <= 1; sd_was_rd <= 1; sd_cal <= 1;
 			end
 		end
-		// DIAG-REVERT-2026-10-13: a phase move invalidates the prefetched byte
+		// a phase move invalidates the prefetched byte
 		if (sd_recal) sd_last_addr <= 20'hFFFFF;
 	end
 end
@@ -1452,8 +1481,7 @@ sdram sdram_dongle (
 	.clk        (clk_sys),
 	.SDRAM_DQ   (SDRAM_DQ),   .SDRAM_A    (SDRAM_A),    .SDRAM_DQML (SDRAM_DQML), .SDRAM_DQMH (SDRAM_DQMH),
 	.SDRAM_BA   (SDRAM_BA),   .SDRAM_nCS  (SDRAM_nCS),  .SDRAM_nWE  (SDRAM_nWE),  .SDRAM_nRAS (SDRAM_nRAS),
-	// DIAG-REVERT-2026-10-13: original below — SDRAM_CLK now comes from CLK_SDRAM
-	// .SDRAM_nCAS (SDRAM_nCAS), .SDRAM_CKE  (SDRAM_CKE),  .SDRAM_CLK  (SDRAM_CLK),  .SDRAM_EN   (1'b1),
+	// SDRAM_CLK is driven from CLK_SDRAM below
 	.SDRAM_nCAS (SDRAM_nCAS), .SDRAM_CKE  (SDRAM_CKE),  .SDRAM_CLK  (),  .SDRAM_EN   (1'b1),
 	.sel        (1'b1),
 	.addr       (sd_addr),    .dout (sd_dout), .din (sd_din),
@@ -1461,7 +1489,7 @@ sdram sdram_dongle (
 	.cpsel (1'b0), .cpaddr (26'd0), .cpdin (16'd0), .cprd (), .cpreq (1'b0), .cpbusy ()
 );
 
-// DIAG-REVERT-2026-10-13: SDRAM_CLK driver added. Same inverted DDR output as sdram.sv's, on CLK_SDRAM.
+// SDRAM_CLK: same inverted DDR output as sdram.sv's, on the phase-steppable CLK_SDRAM.
 altddio_out
 #(
 	.extend_oe_disable("OFF"),
@@ -1506,10 +1534,18 @@ wire [7:0] in0, in1, in2;
 // Pre-swap: assign in0 = {2'b00, joystick_0[5:0]};  /  assign in1 = {2'b00, joystick_1[5:0]};
 // The Tower (release 8) has twin 4-way sticks: IN bits[3:0] = right stick R/L/U/D, bits[7:4] = left stick R/L/U/D.
 wire ctower_mode = (dongle_type == 4'd1) && (game_id == 8'd8);
-wire signed [7:0] rx0 = joystick_r_analog_0[7:0], ry0 = joystick_r_analog_0[15:8];
-wire signed [7:0] rx1 = joystick_r_analog_1[7:0], ry1 = joystick_r_analog_1[15:8];
-wire [3:0] rstick0 = {ry0 > 8'sd48, ry0 < -8'sd48, rx0 < -8'sd48, rx0 > 8'sd48};  // {D,U,L,R}
-wire [3:0] rstick1 = {ry1 > 8'sd48, ry1 < -8'sd48, rx1 < -8'sd48, rx1 > 8'sd48};
+// CTL-2026-10-25: original right-stick decodes, replaced by ctl_stick_dirs below
+// wire signed [7:0] rx0 = joystick_r_analog_0[7:0], ry0 = joystick_r_analog_0[15:8];
+// wire signed [7:0] rx1 = joystick_r_analog_1[7:0], ry1 = joystick_r_analog_1[15:8];
+// wire [3:0] rstick0 = {ry0 > 8'sd48, ry0 < -8'sd48, rx0 < -8'sd48, rx0 > 8'sd48};  // {D,U,L,R}
+// wire [3:0] rstick1 = {ry1 > 8'sd48, ry1 < -8'sd48, rx1 < -8'sd48, rx1 > 8'sd48};
+// CTL-2026-10-25: right-stick decodes -> controllers.sv ctl_stick_dirs (each axis past +/-48, the same signed compares);
+// ctl_stick_dirs gives {U, D, L, R}, re-ordered to the old {D, U, L, R}.
+wire [3:0] rsd0, rsd1;
+ctl_stick_dirs #(.MODE(0), .THRESH(7'd48)) rstick_p1(.stick(joystick_r_analog_0), .dir(rsd0));
+ctl_stick_dirs #(.MODE(0), .THRESH(7'd48)) rstick_p2(.stick(joystick_r_analog_1), .dir(rsd1));
+wire [3:0] rstick0 = {rsd0[2], rsd0[3], rsd0[1], rsd0[0]};  // {D,U,L,R}
+wire [3:0] rstick1 = {rsd1[2], rsd1[3], rsd1[1], rsd1[0]};
 // DS Telejan (release 14): $E600/$E601 read the keyboard mahjong panel row selected by $E413 bits 3:2 (P2 mirrors P1).
 wire cdsteljn_mode = (dongle_type == 4'd1) && (game_id == 8'd14);
 wire [7:0] mahjong_row;
@@ -1526,8 +1562,12 @@ assign in0 = cdsteljn_mode ? mahjong_row
 assign in1 = cdsteljn_mode ? mahjong_row
            : ctower_mode   ? {joystick_1[2], joystick_1[3], joystick_1[1:0], rstick1}
                            : {2'b00, joystick_1[5:4], joystick_1[2], joystick_1[3], joystick_1[1:0]};  // P2 R/L/U/D/B1/B2 active-high, U/D fixed
+// CTL-2026-10-25: original start wiring (pad 2's Start 1P pressed Start 1), replaced below
+// assign in2 = {~(joystick_0[6] | kb_coin1), ~(joystick_1[6] | kb_coin2), 1'b0,
+//               joystick_0[8]|joystick_1[8]|kb_start2, joystick_0[7]|joystick_1[7]|kb_start1, 3'b000}; // Coins, starts
+// CTL-2026-10-25: pads never linked: pad 2's Start 1P (joystick_1[7]) now gives Start 2, not Start 1 (fleet rule).
 assign in2 = {~(joystick_0[6] | kb_coin1), ~(joystick_1[6] | kb_coin2), 1'b0,
-              joystick_0[8]|joystick_1[8]|kb_start2, joystick_0[7]|joystick_1[7]|kb_start1, 3'b000}; // Coins, starts
+              joystick_0[8]|joystick_1[8]|joystick_1[7]|kb_start2, joystick_0[7]|kb_start1, 3'b000}; // Coins, starts
 
 inputs inputs_inst (
 	.clk_sys          (clk_sys),
@@ -1683,12 +1723,17 @@ video_timing video_timing_inst (
 	.vsync_pulse  ()
 );
 
+// CRTFLIP-2026-10-25: mirrored row for the video layers (audio NMI / vblank keep the real vcnt). See video_crtflip.v.
+wire       crt_flip = status[12];
+wire [8:0] vcnt_v   = crt_flip ? (9'd254 - vcnt) : vcnt;
+
 // FG tilemap (task 08)
 video_fg video_fg_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.cpu_we_fg         (cpu_we_fgvram),
 	.cpu_we_col        (cpu_we_colram),
 	.cpu_we_char_p0    (charram_we_p0),
@@ -1706,7 +1751,8 @@ video_bg video_bg_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.back_h_shift      (back_h_shift_reg),
 	.back_vl_shift     (back_vl_shift_reg),
 	.back_vr_shift     (back_vr_shift_reg),
@@ -1729,7 +1775,8 @@ video_sprites video_sprites_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.color_center_bot  (color_center_bot_reg),
 	.cpu_we_spr        (cpu_we_fgvram),
 	// SPRITE-DESC-SWIZZLE-FIX-2026-06-11: was `.cpu_spr_addr(cpu_addr[9:0])` (raw). DIAG-REVERT: restore raw.
@@ -1754,7 +1801,8 @@ video_missiles video_missiles_inst (
 	.clk_sys           (clk_sys),
 	.ce_pix            (ce_pix),
 	.hcnt              (hcnt),
-	.vcnt              (vcnt),
+	// .vcnt              (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt              (vcnt_v),
 	.color_missiles    (color_missiles_reg),   // MISSILES-IMPL-2026-06-28: was 8'h00 (stubbed)
 	.cpu_we_mis        (cpu_we_colram),
 	// MISSILES-DESC-SWIZZLE-FIX-2026-06-28: was `.cpu_mis_addr(cpu_addr[9:0])` (raw). DIAG-REVERT: restore raw.
@@ -1768,9 +1816,14 @@ video_missiles video_missiles_inst (
 wire [3:0] core_r_hi, core_g_hi, core_b_hi;
 wire [5:0] mixer_pen;
 wire       mixer_modulate;
-wire [7:0] core_r = {core_r_hi, core_r_hi};
-wire [7:0] core_g = {core_g_hi, core_g_hi};
-wire [7:0] core_b = {core_b_hi, core_b_hi};
+// CRTFLIP-2026-10-25: originals below; the palette output now goes through the CRT Flip line mirror.
+// wire [7:0] core_r = {core_r_hi, core_r_hi};
+// wire [7:0] core_g = {core_g_hi, core_g_hi};
+// wire [7:0] core_b = {core_b_hi, core_b_hi};
+wire [3:0] crt_r, crt_g, crt_b;
+wire [7:0] core_r = {crt_r, crt_r};
+wire [7:0] core_g = {crt_g, crt_g};
+wire [7:0] core_b = {crt_b, crt_b};
 
 
 // Palette lookup (task 11)
@@ -1827,7 +1880,8 @@ deco_video_mixer deco_video_mixer_inst (
 	.center_h_shift_space   (center_h_shift_space_reg),
 	.center_v_shift         (center_v_shift_reg),
 	.hcnt                   (hcnt),
-	.vcnt                   (vcnt),
+	// .vcnt                   (vcnt),   (pre-CRTFLIP-2026-10-25)
+	.vcnt                   (vcnt_v),
 	.out_pen                (mixer_pen),
 	.out_pen_b4_modulate    (mixer_modulate)
 );
@@ -1844,13 +1898,83 @@ pause #(8,8,8,24) pause_inst (
 	.reset         (pause_reset),   // PAUSE-LOAD-2026-06-28: excl. ioctl_download → pause works during the cassette load
 	.OSD_STATUS    (OSD_STATUS),
 	.user_button   (m_pause),
-	.pause_request (1'b0),
+	// .pause_request (1'b0),   (pre-HISCORE-2026-10-25)
+	.pause_request (hs_pause),
 	.options       (~status[26:25]),  // [0]=pause when OSD open; [1]=dim video after 10s
 	.r             (core_r),
 	.g             (core_g),
 	.b             (core_b),
 	.pause_cpu     (pause_cpu),
 	.rgb_out       (rgb_pause)
+);
+
+// =========================================================================
+// HISCORE-2026-10-25: config = MRA index 3, dump = index 4; RAM through the CPU bus (decocass.v hs_*).
+// The cassette load writes RAM $0000-$5FFF, so a restore before the game runs gets overwritten (user 2026-10-25).
+// hiscore.v arms its restore on the falling edge of its reset, so hold that reset until the BIOS hands over to
+// the game: the first opcode fetch below $F000 (cflyball trace: JMP $F146 -> $0503 after the load + rewind).
+// =========================================================================
+reg hs_game_run = 1'b0;
+always @(posedge clk_sys) begin
+	if (reset)                                                hs_game_run <= 1'b0;
+	else if (cpu_sync && ce_hclk4 && cpu_addr < 16'hF000)     hs_game_run <= 1'b1;
+end
+wire hs_reset = reset | ~hs_game_run;
+// HISCORE-OSD-2026-10-25: hiscore.v extracts on every OSD open, even while held in reset. During the (minutes-long)
+// load that copied mid-load RAM over the downloaded scores and autosaved it (HW: restore = garbage; sim: 27/36 bytes).
+// So the OSD only reaches it once the game runs, 2 clocks late so its reset release (restore pending) comes first.
+reg [1:0] hs_game_run_d = 2'b00;
+always @(posedge clk_sys) hs_game_run_d <= {hs_game_run_d[0], hs_game_run};
+
+// PLAID-2026-10-25: Fast Load = PLAID -> instant load (rtl/mcu/plaid_load.v). Window = reset .. hs_game_run.
+// Not for the tapeless multigames (Darksoft 7 / Widel 8).
+plaid_load plaid_load_inst (
+	.clk_sys       (clk_sys),
+	.reset         (reset),
+	.sel           ((status[29:27] == 3'd5) && (dongle_type != 4'd7) && (dongle_type != 4'd8)),
+	.game_run      (hs_game_run),
+	.restart       (pl_restart),
+	.active        (pl_active),
+	.ce_main_fast  (pl_ce_main),
+	.ce_audio_fast (pl_ce_audio),
+	.cpu_re        (cpu_re_e5xx),
+	.cpu_we        (cpu_we_e5xx),
+	.cpu_addr_lo   (cpu_addr[7:0]),
+	.cpu_dout      (cpu_dout),
+	.cas_addr      (pl_cas_addr),
+	.cas_q         (tape_image_q),
+	.dbb_dout      (pl_dbb_dout),
+	.dbb_sts       (pl_dbb_sts),
+	.e502          (pl_e502)
+);
+
+hiscore #(
+	.HS_ADDRESSWIDTH(16),
+	.CFG_ADDRESSWIDTH(4),
+	.CFG_LENGTHWIDTH(2)
+) hi (
+	.clk              (clk_sys),
+	.paused           (pause_cpu),
+	.reset            (hs_reset),
+	.autosave         (status[24]),
+	.ioctl_upload     (ioctl_upload),
+	.ioctl_upload_req (ioctl_upload_req),
+	.ioctl_download   (ioctl_download),
+	.ioctl_wr         (ioctl_wr),
+	.ioctl_addr       (ioctl_addr),
+	.ioctl_index      (ioctl_index),
+	// .OSD_STATUS       (OSD_STATUS),   (pre-HISCORE-OSD-2026-10-25)
+	.OSD_STATUS       (OSD_STATUS & hs_game_run_d[1]),
+	.data_from_hps    (ioctl_dout),
+	.data_from_ram    (hs_data_out),
+	.ram_address      (hs_address),
+	.data_to_hps      (ioctl_din),
+	.data_to_ram      (hs_data_in),
+	.ram_write        (hs_write_enable),
+	.ram_intent_read  (),
+	.ram_intent_write (),
+	.pause_cpu        (hs_pause),
+	.configured       ()
 );
 
 // =========================================================================
@@ -1903,6 +2027,16 @@ wire video_vblank_d = vbl_sr[VID_HV_DELAY-1];
 wire video_hsync_d  = hs_sr[VID_HV_DELAY-1];
 wire video_vsync_d  = vs_sr[VID_HV_DELAY-1];
 // ===== end VIDEO-ALIGN-2026-06-06 =====
+
+// CRTFLIP-2026-10-25: horizontal half of the CRT Flip (captures the displayed window, plays it back mirrored)
+video_crtflip video_crtflip_inst (
+	.clk_sys (clk_sys),
+	.ce_pix  (ce_pix),
+	.en      (crt_flip),
+	.hblank  (video_hblank_d),
+	.rgb_in  ({core_r_hi, core_g_hi, core_b_hi}),
+	.rgb_out ({crt_r, crt_g, crt_b})
+);
 
 screen_rotate screen_rotate (.*);
 

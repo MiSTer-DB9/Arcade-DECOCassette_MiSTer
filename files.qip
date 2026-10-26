@@ -38,8 +38,10 @@ set_global_assignment -name VHDL_FILE rtl/cpu/T48/timer.vhd
 set_global_assignment -name VERILOG_FILE rtl/decocass.v
 
 # Common
-set_global_assignment -name VERILOG_FILE rtl/hiscore.v
-set_global_assignment -name VERILOG_FILE rtl/pause.v
+set_global_assignment -name VERILOG_FILE rtl/mister_custom/hiscore.v
+# CTL-2026-10-25: shared input library (controllers.sv v2)
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister_custom/controllers.sv
+set_global_assignment -name VERILOG_FILE rtl/mister_custom/pause.v
 set_global_assignment -name VERILOG_FILE rtl/clock_div.v
 
 # Dedicated 8 MHz real clock for the 8041 MCU (copied from Arcade-JunoFirst sound PLL).
@@ -69,12 +71,16 @@ set_global_assignment -name VERILOG_FILE rtl/video/video_sprites.v
 set_global_assignment -name VERILOG_FILE rtl/video/video_missiles.v
 set_global_assignment -name VERILOG_FILE rtl/video/video_palette.v
 set_global_assignment -name VERILOG_FILE rtl/video/video_mixer.v
+# CRTFLIP-2026-10-25: CRT Flip line mirror
+set_global_assignment -name VERILOG_FILE rtl/video/video_crtflip.v
 
 # MCU + tape (phases 15-17)
 set_global_assignment -name VERILOG_FILE rtl/mcu/i8041_top.v
 set_global_assignment -name VERILOG_FILE rtl/mcu/mcu_pmem.v
 set_global_assignment -name VERILOG_FILE rtl/mcu/tape_streamer.v
 set_global_assignment -name VERILOG_FILE rtl/mcu/mcu_tape_iface.v
+# PLAID-2026-10-25: Fast Load = PLAID (instant load: 8041 host-port stand-in + 16x CPUs until game entry)
+set_global_assignment -name VERILOG_FILE rtl/mcu/plaid_load.v
 
 # I/O (phase 23, 24)
 set_global_assignment -name VERILOG_FILE rtl/io/inputs.v
@@ -102,4 +108,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE  rtl/ram_rom/ddram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE  rtl/ram_rom/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE  rtl/ram_rom/sdram_phase_cal.sv
 set_global_assignment -name SYSTEMVERILOG_FILE  rtl/ram_rom/sdram_phase_ctl.sv
-set_global_assignment -name VHDL_FILE           rtl/ram_rom/dpram_dc.vhd
+# DPRAMSV-2026-10-25: VHDL dpram_dc replaced by the SystemVerilog one (same ports/generics + byteena); original:
+# set_global_assignment -name VHDL_FILE           rtl/ram_rom/dpram_dc.vhd
+set_global_assignment -name SYSTEMVERILOG_FILE           rtl/ram_rom/dpram_dc.sv
